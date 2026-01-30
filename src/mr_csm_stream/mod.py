@@ -162,10 +162,15 @@ class NoReferenceAudioError(Exception):
     pass
 
 
-async def get_or_create_client(log_id: str, context=None) -> CSMClient:
+async def get_or_create_client(log_id: str, context=None, require_ref_audio: bool = True) -> CSMClient:
     """Get or create CSM client for session."""
     if log_id not in _csm_clients:
-        logger.info(f"Creating new CSM client for session {log_id}")
+        _create_new_client = True
+    else:
+        _create_new_client = False
+    
+    if _create_new_client:
+        logger.info(f"Creating new CSM client for session {log_id} (require_ref_audio={require_ref_audio})")
         client = CSMClient(CSM_SERVER_URL)
         await client.connect()
         
@@ -197,12 +202,15 @@ async def get_or_create_client(log_id: str, context=None) -> CSMClient:
                     ref_text = transcribed
         
         # CRITICAL: Fail if no reference audio - CSM will use wrong voice without it
-        if ref_audio is None:
+        if ref_audio is None and require_ref_audio:
             raise NoReferenceAudioError(
                 f"No reference audio found for CSM TTS! "
                 f"Set persona voice_id to an audio file path, or set MR_CSM_REF_AUDIO env var. "
                 f"Session: {log_id}"
             )
+        elif ref_audio is None:
+            logger.warning(f"No reference audio for session {log_id} - audio forwarding only, generation will fail")
+            # Still create client for audio forwarding, but generation will fail later
         
         await client.init_session(
             session_id=log_id,
@@ -211,6 +219,50 @@ async def get_or_create_client(log_id: str, context=None) -> CSMClient:
             speaker_id=CSM_SPEAKER_ID
         )
         _csm_clients[log_id] = client
+        
+    else:
+        # Client exists - but check if we need to reinitialize with ref audio
+        client = _csm_clients[log_id]
+        
+        # If require_ref_audio and client was created without it, try to load now
+        if require_ref_audio and not client._has_ref_audio:
+            logger.info(f"Reinitializing CSM client with reference audio for session {log_id}")
+            
+            ref_audio = None
+            ref_text = CSM_REF_TEXT
+            
+            voice_path = await get_voice_path_from_context(context)
+            if voice_path:
+                ref_audio = _load_ref_audio(voice_path)
+                persona_ref_text = await get_ref_text_from_context(context)
+                if persona_ref_text:
+                    ref_text = persona_ref_text
+                elif not ref_text:
+                    transcribed = await transcribe_reference_audio(voice_path)
+                    if transcribed:
+                        ref_text = transcribed
+            elif CSM_REF_AUDIO and os.path.exists(CSM_REF_AUDIO):
+                ref_audio = _load_ref_audio(CSM_REF_AUDIO)
+                if not ref_text:
+                    transcribed = await transcribe_reference_audio(CSM_REF_AUDIO)
+                    if transcribed:
+                        ref_text = transcribed
+            
+            if ref_audio is None:
+                raise NoReferenceAudioError(
+                    f"No reference audio found for CSM TTS! "
+                    f"Set persona voice_id to an audio file path, or set MR_CSM_REF_AUDIO env var. "
+                    f"Session: {log_id}"
+                )
+            
+            # Reinitialize session with ref audio
+            await client.init_session(
+                session_id=log_id,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                speaker_id=CSM_SPEAKER_ID
+            )
+            client._has_ref_audio = True
         
     return _csm_clients[log_id]
 
@@ -231,13 +283,21 @@ async def forward_audio_to_csm(data: dict, context=None) -> dict:
         return data
         
     try:
-        # Get or create client (non-blocking if already exists)
+        # Get or create client on first audio chunk
+        # This ensures audio is captured from the start of the call
         if context.log_id in _csm_clients:
             client = _csm_clients[context.log_id]
             await client.send_audio(audio_bytes)
+        else:
+            # Create client on first audio - this captures audio from call start
+            # Don't require ref audio here - we just want to buffer audio
+            client = await get_or_create_client(context.log_id, context, require_ref_audio=False)
+            await client.send_audio(audio_bytes)
     except Exception as e:
-        # Don't log every error - too noisy
-        pass
+        # Log first error per session, then suppress
+        if not hasattr(context, '_csm_audio_error_logged'):
+            logger.warning(f"Error forwarding audio to CSM: {e}")
+            context._csm_audio_error_logged = True
         
     return data
 

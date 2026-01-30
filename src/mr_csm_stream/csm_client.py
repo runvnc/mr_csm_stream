@@ -29,6 +29,7 @@ class CSMClient:
         self._generating = False
         self._connected = False
         self._reconnect_lock = asyncio.Lock()
+        self._has_ref_audio = False  # Track if reference audio has been loaded
         
     async def connect(self):
         """Connect to CSM server."""
@@ -99,6 +100,9 @@ class CSMClient:
         if ref_audio:
             msg["ref_audio_base64"] = base64.b64encode(ref_audio).decode()
             msg["ref_text"] = ref_text
+            self._has_ref_audio = True
+        else:
+            self._has_ref_audio = False
             
         await self.ws.send(json.dumps(msg))
         
