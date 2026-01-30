@@ -40,6 +40,9 @@ CSM_REF_TEXT = os.environ.get('MR_CSM_REF_TEXT', '')
 CSM_SPEAKER_ID = int(os.environ.get('MR_CSM_SPEAKER_ID', '0'))
 
 
+# Cache for transcribed reference audio
+_ref_text_cache: Dict[str, str] = {}
+
 async def get_voice_path_from_context(context) -> Optional[str]:
     """Get the voice audio path from the agent's persona.
     
@@ -95,11 +98,68 @@ async def get_ref_text_from_context(context) -> Optional[str]:
 
 def _load_ref_audio(audio_path: str) -> Optional[bytes]:
     """Load reference audio file."""
+    with open(audio_path, 'rb') as f:
+        return f.read()
+
+
+async def transcribe_reference_audio(audio_path: str) -> Optional[str]:
+    """Transcribe reference audio file using Deepgram.
+    
+    Results are cached by file path to avoid re-transcribing.
+    """
+    global _ref_text_cache
+    
+    if audio_path in _ref_text_cache:
+        logger.info(f"Using cached transcription for {audio_path}")
+        return _ref_text_cache[audio_path]
+    
     if not audio_path or not os.path.exists(audio_path):
         return None
     
-    with open(audio_path, 'rb') as f:
-        return f.read()
+    try:
+        from deepgram import DeepgramClient, PrerecordedOptions, FileSource
+        
+        api_key = os.environ.get('DEEPGRAM_API_KEY')
+        if not api_key:
+            logger.warning("DEEPGRAM_API_KEY not set - cannot auto-transcribe reference audio")
+            return None
+        
+        logger.info(f"Transcribing reference audio with Deepgram: {audio_path}")
+        
+        # Read audio file
+        with open(audio_path, 'rb') as f:
+            audio_data = f.read()
+        
+        # Create Deepgram client and transcribe
+        client = DeepgramClient(api_key)
+        
+        source = FileSource(buffer=audio_data)
+        options = PrerecordedOptions(model="nova-2", language="en")
+        
+        response = client.listen.prerecorded.v("1").transcribe_file(source, options)
+        
+        # Extract transcript
+        text = response.results.channels[0].alternatives[0].transcript.strip()
+        
+        if text:
+            _ref_text_cache[audio_path] = text
+            logger.info(f"Transcribed reference audio: {text[:100]}...")
+            return text
+        else:
+            logger.warning(f"Transcription returned empty text for {audio_path}")
+            return None
+            
+    except ImportError as e:
+        logger.warning(f"Deepgram SDK not installed - cannot auto-transcribe reference audio: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error transcribing reference audio: {e}")
+        return None
+
+
+class NoReferenceAudioError(Exception):
+    """Raised when CSM generation is attempted without reference audio."""
+    pass
 
 
 async def get_or_create_client(log_id: str, context=None) -> CSMClient:
@@ -117,16 +177,37 @@ async def get_or_create_client(log_id: str, context=None) -> CSMClient:
         voice_path = await get_voice_path_from_context(context)
         if voice_path:
             ref_audio = _load_ref_audio(voice_path)
-            ref_text = await get_ref_text_from_context(context) or ref_text
+            # Try to get ref_text from persona first
+            persona_ref_text = await get_ref_text_from_context(context)
+            if persona_ref_text:
+                ref_text = persona_ref_text
+            elif not ref_text:
+                # Auto-transcribe if no ref_text provided
+                transcribed = await transcribe_reference_audio(voice_path)
+                if transcribed:
+                    ref_text = transcribed
             logger.info(f"Loaded reference audio from persona: {voice_path}")
         elif CSM_REF_AUDIO and os.path.exists(CSM_REF_AUDIO):
             ref_audio = _load_ref_audio(CSM_REF_AUDIO)
             logger.info(f"Loaded reference audio from env: {CSM_REF_AUDIO}")
+            # Auto-transcribe env ref audio if no ref_text
+            if not ref_text:
+                transcribed = await transcribe_reference_audio(CSM_REF_AUDIO)
+                if transcribed:
+                    ref_text = transcribed
+        
+        # CRITICAL: Fail if no reference audio - CSM will use wrong voice without it
+        if ref_audio is None:
+            raise NoReferenceAudioError(
+                f"No reference audio found for CSM TTS! "
+                f"Set persona voice_id to an audio file path, or set MR_CSM_REF_AUDIO env var. "
+                f"Session: {log_id}"
+            )
         
         await client.init_session(
             session_id=log_id,
             ref_audio=ref_audio,
-            ref_text=CSM_REF_TEXT,
+            ref_text=ref_text,
             speaker_id=CSM_SPEAKER_ID
         )
         _csm_clients[log_id] = client
