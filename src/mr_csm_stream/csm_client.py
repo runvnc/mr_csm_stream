@@ -16,6 +16,7 @@ import time
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+import uuid
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +30,7 @@ class CSMClient:
         self._generating = False
         self._connected = False
         self._reconnect_lock = asyncio.Lock()
+        self._current_generation_id: Optional[str] = None
         self._has_ref_audio = False  # Track if reference audio has been loaded
         
     async def connect(self):
@@ -147,14 +149,37 @@ class CSMClient:
         """Generate audio and yield chunks."""
         await self.ensure_connected()
         
+        # Generate a unique ID for this generation
+        generation_id = str(uuid.uuid4())[:8]
+        self._current_generation_id = generation_id
+        
         gen_start = time.perf_counter()
         chunk_count = 0
         
         self._generating = True
         
+        # Drain any stale messages from previous (possibly interrupted) generation
+        # This prevents old audio chunks from being yielded
+        drained_count = 0
+        try:
+            while True:
+                # Non-blocking check for pending messages
+                msg = await asyncio.wait_for(self.ws.recv(), timeout=0.01)
+                data = json.loads(msg)
+                drained_count += 1
+                logger.info(f"Drained stale message: {data.get('type')}")
+        except asyncio.TimeoutError:
+            pass  # No more pending messages
+        except Exception as e:
+            logger.warning(f"Error draining messages: {e}")
+        
+        if drained_count > 0:
+            logger.warning(f"Drained {drained_count} stale messages before generation")
+        
         msg = {
             "type": "generate",
-            "text": text
+            "text": text,
+            "generation_id": generation_id
         }
         await self.ws.send(json.dumps(msg))
         logger.info(f"Generating: {text[:50]}...")
@@ -171,6 +196,15 @@ class CSMClient:
                 data = json.loads(response)
                 
                 if data["type"] == "audio":
+                    # Check generation_id to filter out stale audio
+                    msg_gen_id = data.get("generation_id")
+                    if msg_gen_id and msg_gen_id != generation_id:
+                        logger.warning(
+                            f"Ignoring stale audio chunk with generation_id={msg_gen_id}, "
+                            f"expected={generation_id}"
+                        )
+                        continue
+                    
                     audio_bytes = base64.b64decode(data["data"])
                     chunk_count += 1
                     elapsed = recv_time - gen_start
