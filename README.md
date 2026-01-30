@@ -1,0 +1,64 @@
+# mr_csm_stream
+
+MindRoot TTS plugin using CSM (Conversational Speech Model) with audio context.
+
+## Overview
+
+This plugin provides text-to-speech using the CSM model, which incorporates the user's speech audio into its generation for more natural conversational responses.
+
+**Key Innovation:** Streams user audio to CSM server continuously (parallel to Deepgram STT) so there's zero upload latency when generation starts.
+
+## Architecture
+
+```
+mr_sip (audio) → mr_csm_stream → CSM Server (GPU)
+                      ↑
+              Deepgram (STT) → EndOfTurn + text
+```
+
+## Requirements
+
+- CSM Server running (see /files/csm-server)
+- MindRoot with mr_sip plugin
+
+## Configuration
+
+Environment variables:
+
+- `MR_CSM_SERVER_URL`: WebSocket URL to CSM server (default: ws://localhost:8765/ws)
+- `MR_CSM_REF_AUDIO`: Path to reference audio file for voice cloning
+- `MR_CSM_REF_TEXT`: Text spoken in reference audio
+- `MR_CSM_SPEAKER_ID`: Speaker ID for generated voice (default: 0)
+- `MR_CSM_REALTIME_STREAM`: Enable realtime LLM text streaming (default: 0)
+
+## Services
+
+### stream_tts
+
+Stream TTS audio using CSM. Compatible with mr_eleven_stream interface.
+
+```python
+async for chunk in stream_tts(text="Hello", context=context):
+    # chunk is ulaw 8kHz audio bytes
+    pass
+```
+
+## Commands
+
+### speak
+
+Generate speech and send to SIP.
+
+```json
+{"speak": {"text": "Hello, how can I help you?"}}
+```
+
+## Hooks
+
+- `user_utterance_complete`: Called when user finishes speaking
+- `on_interrupt`: Called when user barges in
+- `session_end`: Cleanup when session ends
+
+## Pipes
+
+- `sip_audio_in`: Intercepts incoming SIP audio and forwards to CSM server

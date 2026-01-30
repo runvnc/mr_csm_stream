@@ -1,0 +1,45 @@
+{
+  "name": "CSM Streaming TTS",
+  "version": "0.1.0",
+  "description": "Drop-in replacement for mr_eleven_stream using CSM (Conversational Speech Model) with audio context for natural conversational responses",
+  "author": "MindRoot",
+  "dependencies": [
+    "websockets>=11.0"
+  ],
+  "services": [
+    "stream_tts"
+  ],
+  "commands": [
+    "speak"
+  ],
+  "pipes": [
+    "sip_audio_in"
+  ],
+  "hooks": [
+    "user_utterance_complete",
+    "on_interrupt",
+    "session_end"
+  ],
+  "env_vars": {
+    "MR_CSM_SERVER_URL": {
+      "description": "WebSocket URL for CSM server",
+      "default": "ws://localhost:8765/ws"
+    },
+    "MR_CSM_REF_AUDIO": {
+      "description": "Path to reference audio file for voice cloning (fallback if not in persona)",
+      "default": ""
+    },
+    "MR_CSM_REF_TEXT": {
+      "description": "Transcript of reference audio (fallback if not in persona)",
+      "default": ""
+    },
+    "MR_CSM_SPEAKER_ID": {
+      "description": "Speaker ID for generation",
+      "default": "0"
+    }
+  },
+  "persona_fields": {
+    "voice_id": "Absolute path to reference audio file (3-10 seconds of speech)",
+    "voice_ref_text": "Transcript of the reference audio"
+  }
+}

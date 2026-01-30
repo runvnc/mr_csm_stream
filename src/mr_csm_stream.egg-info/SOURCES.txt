@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/mr_csm_stream/__init__.py
+src/mr_csm_stream/audio_pacer.py
+src/mr_csm_stream/csm_client.py
+src/mr_csm_stream/mod.py
+src/mr_csm_stream.egg-info/PKG-INFO
+src/mr_csm_stream.egg-info/SOURCES.txt
+src/mr_csm_stream.egg-info/dependency_links.txt
+src/mr_csm_stream.egg-info/requires.txt
+src/mr_csm_stream.egg-info/top_level.txt
