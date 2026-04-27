@@ -268,6 +268,14 @@ async def get_or_create_client(log_id: str, context=None, require_ref_audio: boo
 
 
 @pipe(name='sip_audio_in', priority=10)
+# TODO: Replace sip_audio_in pipeline with subscribe_sip_audio_in service.
+# The current approach calls this pipe 50x/sec (every 20ms RTP frame), which
+# adds significant overhead via pipeline_manager. Plan is to add a generic
+# subscribe_sip_audio_in / unsubscribe_sip_audio_in service pair in mr_sip
+# that lets plugins register an asyncio.Queue directly on PySIP's RTP
+# _output_queues. This gives zero per-frame overhead and lets each plugin
+# control its own batching/buffering. The sip_audio_in pipeline in
+# sip_client_v2.py is now gated behind MR_SIP_AUDIO_IN_PIPELINE=1 env var.
 async def forward_audio_to_csm(data: dict, context=None) -> dict:
     """
     Intercept incoming SIP audio and forward to CSM server.
@@ -406,6 +414,7 @@ async def speak(
     await lock.acquire()
     
     bypass_pacer = CSM_BYPASS_PACER
+    sip_response_started = False
     
     speak_start = time.perf_counter()
     print(f"SPEAK: Starting speak() for text: {text[:50]}...")
@@ -432,6 +441,12 @@ async def speak(
             pass
         
         chunk_count = 0
+
+        try:
+            sip_response_started = await service_manager.sip_start_audio_response(context=context)
+            logger.debug(f"SPEAK: SIP audio response start={sip_response_started}")
+        except Exception as e:
+            logger.debug(f"SPEAK: SIP audio response start unavailable: {e}")
         
         if bypass_pacer:
             # BYPASS MODE: Send directly to SIP without pacing
@@ -520,6 +535,13 @@ async def speak(
         return f"Error: {str(e)}"
         
     finally:
+        if sip_response_started:
+            try:
+                ended = await service_manager.sip_end_audio_response(context=context)
+                logger.debug(f"SPEAK: SIP audio response end={ended}")
+            except Exception as e:
+                logger.warning(f"Failed to end SIP audio response: {e}")
+
         if lock.locked():
             lock.release()
 
